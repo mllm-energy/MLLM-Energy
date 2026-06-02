@@ -1,0 +1,5 @@
+# Local tooling and source bundles — not part of the published site
+.claude/
+SysML_Final_Project.zip
+pastproject.html
+.DS_Store

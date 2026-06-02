@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Energy-Efficient Multi-Modal LLM Serving — A Sub-phase Characterization Study</title>
+<meta name="description" content="A phase-level characterization of multimodal LLM inference on NVIDIA A100. Decode dominates wall time while underutilizing the GPU; throughput and power saturate at SM=36, leaving reclaimable energy headroom.">
+<meta property="og:title" content="Energy-Efficient Multi-Modal LLM Serving">
+<meta property="og:description" content="Decode eats 89% of the request but uses 14% of the GPU. A sub-phase characterization study on InternVL3-8B.">
+<meta property="og:type" content="website">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --font-sans:system-ui,-apple-system,sans-serif;
+  --font-mono:ui-monospace,"SF Mono","Cascadia Code",monospace;
+  --color-background-primary:#ffffff;--color-background-secondary:#f5f4ef;
+  --color-text-primary:#1a1a18;--color-text-secondary:#5a5a56;--color-text-tertiary:#9a9a94;
+  --color-border-tertiary:rgba(0,0,0,0.12);--color-border-secondary:rgba(0,0,0,0.22);--color-border-primary:rgba(0,0,0,0.35);
+  --border-radius-md:8px;--border-radius-lg:12px;
+  --c0:#E24B4A;--c1:#378ADD;--c2:#1D9E75;--c3:#888780;--c4:#BA7517;--c5:#D4537E;--c6:#7F77DD;
+  --tb0:#FAECE7;--tb1:#E6F1FB;--tb2:#E1F5EE;--tb3:#F1EFE8;--tb4:#FAEEDA;--tb5:#FBEAF0;--tb6:#EEEDFE;
+  --tt0:#993C1D;--tt1:#185FA5;--tt2:#0F6E56;--tt3:#5F5E5A;--tt4:#854F0B;--tt5:#72243E;--tt6:#3C3489;
+  --fig-surface:#faf9f4;
+}
+@media(prefers-color-scheme:dark){:root{
+  --color-background-primary:#1e1e1c;--color-background-secondary:#2a2a28;
+  --color-text-primary:#e8e8e2;--color-text-secondary:#a8a8a2;--color-text-tertiary:#686864;
+  --color-border-tertiary:rgba(255,255,255,0.1);--color-border-secondary:rgba(255,255,255,0.18);--color-border-primary:rgba(255,255,255,0.3);
+  --c0:#F09595;--c1:#85B7EB;--c2:#5DCAA5;--c3:#B4B2A9;--c4:#EF9F27;--c5:#ED93B1;--c6:#AFA9EC;
+  --tb0:#4A1B0C;--tb1:#042C53;--tb2:#04342C;--tb3:#2C2C2A;--tb4:#412402;--tb5:#4B1528;--tb6:#26215C;
+  --tt0:#F5C4B3;--tt1:#B5D4F4;--tt2:#9FE1CB;--tt3:#D3D1C7;--tt4:#FAC775;--tt5:#F4C0D1;--tt6:#CECBF6;
+  --fig-surface:#f3f1ea;
+}}
+body{font-family:var(--font-sans);background:var(--color-background-primary);color:var(--color-text-primary);padding:2rem 1.5rem;max-width:820px;margin:0 auto}
+
+/* ── Hero ── */
+.hero{margin-bottom:2rem}
+.hero-tag{display:inline-block;font-size:10px;letter-spacing:.08em;color:var(--color-text-tertiary);background:var(--color-background-secondary);border:0.5px solid var(--color-border-tertiary);padding:3px 10px;border-radius:20px;margin-bottom:.75rem}
+.hero-title{font-size:22px;font-weight:600;line-height:1.3;color:var(--color-text-primary);margin-bottom:.5rem;letter-spacing:-.01em}
+.hero-authors{font-size:13px;color:var(--color-text-secondary);margin-bottom:.2rem}
+.hero-inst{font-size:12px;color:var(--color-text-tertiary)}
+.hero-desc{font-size:13px;color:var(--color-text-secondary);line-height:1.65;max-width:680px;margin-top:.85rem}
+.hero-links{display:flex;gap:10px;flex-wrap:wrap;margin-top:1rem}
+.hero-link{font-size:11px;padding:4px 12px;border:0.5px solid var(--color-border-secondary);border-radius:20px;color:var(--color-text-secondary);text-decoration:none;transition:border-color .12s,color .12s}
+.hero-link:hover{border-color:var(--color-border-primary);color:var(--color-text-primary)}
+
+/* ── Key findings ── */
+.findings-label{font-size:10px;color:var(--color-text-tertiary);letter-spacing:.07em;margin-bottom:.6rem}
+.findings-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:2rem}
+@media(max-width:560px){.findings-grid{grid-template-columns:1fr}}
+.fc{border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);overflow:hidden;display:flex;flex-direction:column}
+.fc-header{padding:11px 14px}
+.fc-num{font-size:14px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap;font-family:var(--font-mono)}
+.fc-body{padding:11px 14px;background:var(--color-background-secondary);flex:1}
+.fc-desc{font-size:11px;color:var(--color-text-secondary);line-height:1.5}
+
+/* ── Phase interactive box ── */
+.struct-box{border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);overflow:hidden;margin-bottom:2rem}
+.struct-body{padding:20px 22px 10px;background:var(--color-background-primary);display:flex;flex-direction:column}
+.struct-body-diag{margin:0;aspect-ratio:680/210;width:100%}
+.struct-body-diag svg{display:block;width:100%;height:100%}
+.struct-body-label{font-size:10px;letter-spacing:.09em;margin-bottom:10px;font-weight:600}
+.struct-body-row{display:grid;grid-template-columns:minmax(160px,auto) 1fr;gap:28px;align-items:start;margin-bottom:8px}
+.struct-body-title{font-size:18px;font-weight:600;letter-spacing:-.01em}
+.struct-body-tag{display:inline-block;margin-top:8px;font-size:10px;padding:3px 8px;border-radius:10px;font-weight:500}
+.struct-body-desc{font-size:13px;color:var(--color-text-secondary);line-height:1.65}
+.struct-body-stats{display:flex;gap:16px;margin-top:12px;flex-wrap:wrap}
+.struct-stat{font-size:10px;color:var(--color-text-tertiary);letter-spacing:.04em}
+.struct-stat b{display:block;font-size:15px;font-family:var(--font-mono);font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.01em;margin-top:2px}
+@media(max-width:640px){.struct-body-row{grid-template-columns:1fr;gap:10px}}
+.struct-selector{display:grid;grid-template-columns:3fr 1fr;background:var(--color-background-secondary);border-top:0.5px solid var(--color-border-tertiary)}
+.struct-side{padding:10px 14px}
+.struct-side+.struct-side{border-left:0.5px solid var(--color-border-tertiary)}
+.struct-side-label{font-size:9px;color:var(--color-text-tertiary);letter-spacing:.09em;margin-bottom:6px;font-weight:600;text-align:center;text-transform:uppercase}
+.struct-side-items{display:flex;gap:5px;flex-wrap:wrap;justify-content:center}
+.struct-btn{cursor:pointer;padding:4px 10px;border:0.5px solid var(--color-border-tertiary);border-radius:14px;font-size:10px;line-height:1.3;color:var(--color-text-secondary);background:var(--color-background-primary);white-space:nowrap;user-select:none;transition:border-color .12s,color .12s,background .12s}
+.struct-btn:hover:not(.act){border-color:var(--color-border-secondary);color:var(--color-text-primary)}
+.struct-btn.act{font-weight:500}
+@media(max-width:520px){
+  .struct-selector{grid-template-columns:1fr}
+  .struct-side+.struct-side{border-left:none;border-top:0.5px solid var(--color-border-tertiary)}
+  .struct-side-items{gap:6px;flex-wrap:nowrap}
+  .struct-side-items .struct-btn{flex:1;text-align:center;border-radius:8px;padding:9px 8px;font-size:11px}
+}
+
+/* ── Stacked wall-time bar ── */
+.stack{border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);padding:1.1rem 1.25rem;margin-bottom:1rem}
+.stack-hd{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:.7rem}
+.stack-title{font-size:13px;font-weight:600}
+.stack-meta{font-size:10px;color:var(--color-text-tertiary);letter-spacing:.06em;text-transform:uppercase;font-weight:500}
+.stack-track{display:flex;height:42px;border-radius:7px;overflow:hidden;background:var(--color-background-secondary)}
+.stack-seg{display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;font-family:var(--font-mono);color:#fff;min-width:0;overflow:hidden;white-space:nowrap;position:relative}
+.stack-legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:.8rem}
+.stack-leg{font-size:11px;color:var(--color-text-secondary);display:flex;align-items:center;gap:6px}
+.stack-dot{width:9px;height:9px;border-radius:2px;flex-shrink:0}
+
+/* ── Performance / utilization ── */
+.perf-h2h{border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);padding:1.1rem 1.25rem;margin-bottom:1rem}
+.perf-h2h-label{font-size:10px;letter-spacing:.09em;color:var(--color-text-tertiary);font-weight:600;margin-bottom:.85rem;text-transform:uppercase}
+.perf-h2h-grid{display:grid;grid-template-columns:1fr 0.5px 1fr;gap:0}
+.perf-h2h-side{padding:0 1.15rem}
+.perf-h2h-side:first-child{padding-left:0}
+.perf-h2h-side:last-child{padding-right:0}
+.perf-h2h-divider{background:var(--color-border-tertiary)}
+.perf-h2h-name{font-size:13px;font-weight:500;margin-bottom:.35rem;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.perf-h2h-pill{font-size:9.5px;padding:1px 7px;border-radius:10px;font-weight:500}
+.perf-h2h-num{font-size:28px;font-weight:600;font-variant-numeric:tabular-nums;font-family:var(--font-mono);letter-spacing:-.02em;line-height:1.15}
+.perf-h2h-unit{font-size:12px;color:var(--color-text-tertiary);margin-left:4px;font-family:var(--font-sans);font-weight:400;letter-spacing:0}
+.perf-h2h-ctx{font-size:11px;color:var(--color-text-tertiary);margin-top:.1rem;margin-bottom:.75rem}
+.perf-h2h-kv{font-size:11px;display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:0.5px solid var(--color-border-tertiary)}
+.perf-h2h-kv:last-of-type{border-bottom:none}
+.perf-h2h-kv-k{color:var(--color-text-tertiary)}
+.perf-h2h-kv-v{color:var(--color-text-primary);font-family:var(--font-mono);font-size:10.5px;text-align:right}
+@media(max-width:560px){
+  .perf-h2h-grid{grid-template-columns:1fr}
+  .perf-h2h-side{padding:0}
+  .perf-h2h-side:first-child{padding-bottom:1rem}
+  .perf-h2h-side:last-child{padding-top:1rem;border-top:0.5px solid var(--color-border-tertiary)}
+  .perf-h2h-divider{display:none}
+}
+.perf-panel{border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);padding:1rem 1.1rem;margin-bottom:1rem}
+.perf-panel-hd{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:.35rem}
+.perf-panel-title{font-size:13px;font-weight:600}
+.perf-panel-meta{font-size:10px;color:var(--color-text-tertiary);letter-spacing:.06em;text-transform:uppercase;font-weight:500}
+.perf-panel-sub{font-size:11.5px;color:var(--color-text-secondary);line-height:1.5;margin-bottom:.8rem}
+.perf-tabs{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:.85rem}
+.perf-tab{cursor:pointer;padding:5px 10px;border:0.5px solid var(--color-border-tertiary);border-radius:14px;font-size:10.5px;background:var(--color-background-primary);color:var(--color-text-secondary);user-select:none;transition:border-color .12s,color .12s,background .12s;line-height:1.25}
+.perf-tab:hover:not(.act){border-color:var(--color-border-secondary);color:var(--color-text-primary)}
+.perf-tab.act{border-color:var(--color-border-primary);color:var(--color-text-primary);background:var(--color-background-secondary);font-weight:500}
+.perf-tab-sub{color:var(--color-text-tertiary);margin-left:5px;font-size:9.5px}
+.perf-tab.act .perf-tab-sub{color:var(--color-text-secondary)}
+.perf-bar{display:grid;grid-template-columns:minmax(118px,138px) 1fr minmax(64px,auto);gap:12px;align-items:center;padding:5px 0;font-size:11.5px}
+.perf-bar-name{color:var(--color-text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500}
+.perf-bar-track{background:var(--color-background-secondary);height:10px;border-radius:5px;overflow:hidden;min-width:40px}
+.perf-bar-fill{display:block;height:100%;border-radius:5px;transition:width .25s}
+.perf-bar-val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-size:11px;text-align:right;white-space:nowrap}
+.perf-bar-val-unit{color:var(--color-text-tertiary);font-size:9.5px;margin-left:2px}
+.perf-foot{margin-top:.75rem;padding-top:.7rem;border-top:0.5px solid var(--color-border-tertiary)}
+.perf-foot-label{font-size:12px;color:var(--color-text-primary);font-weight:600;margin-bottom:5px;letter-spacing:-.005em}
+.perf-foot-desc{font-size:11.5px;color:var(--color-text-secondary);line-height:1.5;margin-bottom:9px}
+.perf-foot-desc em{font-style:italic;color:var(--color-text-primary);font-weight:500}
+.perf-chips{display:flex;flex-wrap:wrap;gap:5px}
+.perf-chip{font-size:10.5px;padding:3px 10px;border-radius:10px;font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.perf-note{font-size:10.5px;color:var(--color-text-tertiary);margin-top:6px;font-style:italic}
+@media(max-width:480px){
+  .perf-bar{grid-template-columns:minmax(86px,1fr) minmax(0,1.4fr) auto;gap:8px;font-size:11px}
+}
+
+/* ── Figures ── */
+.fig{border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);overflow:hidden;margin-bottom:1rem}
+.fig-media{background:var(--fig-surface);padding:8px}
+.fig-media img{display:block;width:100%;border-radius:6px}
+.fig-cap{padding:10px 14px;font-size:11.5px;line-height:1.55;color:var(--color-text-secondary);background:var(--color-background-secondary);border-top:0.5px solid var(--color-border-tertiary)}
+.fig-cap b{color:var(--color-text-primary);font-weight:600}
+.fig-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:1rem}
+@media(max-width:560px){.fig-grid{grid-template-columns:1fr}}
+.fig-grid .fig{margin-bottom:0}
+
+/* ── Methods grid ── */
+.method-grid{display:grid;grid-template-columns:repeat(3,1fr);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);overflow:hidden;margin-bottom:1rem}
+.method-cell{padding:11px 14px;border-right:0.5px solid var(--color-border-tertiary);border-bottom:0.5px solid var(--color-border-tertiary)}
+.method-k{font-size:9px;color:var(--color-text-tertiary);letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px}
+.method-v{font-size:12.5px;color:var(--color-text-primary);font-weight:500;line-height:1.35}
+.method-v span{color:var(--color-text-tertiary);font-weight:400}
+@media(max-width:560px){.method-grid{grid-template-columns:repeat(2,1fr)}}
+
+/* ── Citation ── */
+.cite-box{border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);overflow:hidden;margin-bottom:1rem}
+.cite-hd{font-size:10px;color:var(--color-text-tertiary);letter-spacing:.08em;text-transform:uppercase;font-weight:600;padding:10px 14px;background:var(--color-background-secondary);border-bottom:0.5px solid var(--color-border-tertiary)}
+.cite-code{padding:12px 14px;font-family:var(--font-mono);font-size:10.5px;line-height:1.6;color:var(--color-text-secondary);white-space:pre;overflow-x:auto}
+.refs{list-style:none;counter-reset:r}
+.refs li{font-size:11.5px;color:var(--color-text-secondary);line-height:1.5;padding:7px 0;border-bottom:0.5px solid var(--color-border-tertiary);display:flex;gap:10px}
+.refs li:last-child{border-bottom:none}
+.refs li::before{counter-increment:r;content:"[" counter(r) "]";color:var(--color-text-tertiary);font-family:var(--font-mono);font-size:10px;flex-shrink:0}
+.refs b{color:var(--color-text-primary);font-weight:600}
+
+/* ── Divider ── */
+.section-divider{display:flex;align-items:center;gap:10px;margin:2rem 0 1rem}
+.section-divider-label{font-size:13px;font-weight:700;color:var(--color-text-primary);letter-spacing:.04em;white-space:nowrap}
+.section-divider-line{flex:1;height:0.5px;background:var(--color-border-secondary)}
+.section-hint{font-size:12px;color:var(--color-text-tertiary);margin-bottom:1rem}
+.footer{margin-top:2.5rem;padding-top:1.25rem;border-top:0.5px solid var(--color-border-tertiary);font-size:11px;color:var(--color-text-tertiary);line-height:1.7}
+.footer a{color:var(--color-text-secondary);text-decoration:none;border-bottom:0.5px solid var(--color-border-tertiary)}
+.footer a:hover{color:var(--color-text-primary)}
+
+@media(max-width:480px){
+  body{padding:1.5rem 1rem}
+  .hero-title{font-size:18px}
+}
+</style>
+</head>
+<body>
+
+<!-- ── Hero ── -->
+<div class="hero">
+  <div class="hero-tag">Systems for Machine Learning · Final Project · UT Austin · Spring 2026</div>
+  <div class="hero-title">Energy-Efficient Multi-Modal LLM Serving<br>A Sub-phase Characterization Study</div>
+  <div class="hero-authors">Aashrith Attelli &nbsp;·&nbsp; Amaury Jayr &nbsp;·&nbsp; Nathan Lemma &nbsp;·&nbsp; Mahin Naveen</div>
+  <div class="hero-inst">University of Texas at Austin</div>
+  <div class="hero-links">
+    <a class="hero-link" href="https://github.com/mllm-energy/MLLM-Energy">GitHub</a>
+    <a class="hero-link" href="paper.pdf" target="_blank">Paper (PDF)</a>
+    <a class="hero-link" href="paper/main.tex">Source (TeX)</a>
+  </div>
+  <div class="section-divider" style="margin-top:1.25rem;margin-bottom:.75rem"><span class="section-divider-label">OVERVIEW</span><span class="section-divider-line"></span></div>
+  <p class="hero-desc">
+    When you ask a multimodal AI to describe an image, the request doesn't hit the GPU as one uniform job. It moves
+    through distinct phases — <strong>looking</strong> at the image, <strong>reading</strong> your prompt, then
+    <strong>writing</strong> the answer one word at a time — and each phase stresses the hardware completely
+    differently. Yet today's serving systems hand the entire GPU to every phase equally.
+    <br><br>
+    We profiled <strong>InternVL3-8B</strong> phase by phase on an NVIDIA A100, then swept how much of the GPU each
+    phase actually gets — from 2 SMs up to all 108 — across <strong>1,080 configurations</strong>. The headline:
+    the phase that takes the most time uses the GPU the least, and roughly <strong>two-thirds of the chip often
+    sits powered but idle</strong>.
+  </p>
+</div>
+
+<!-- ── Key findings ── -->
+<div class="section-divider"><span class="section-divider-label">KEY FINDINGS</span><span class="section-divider-line"></span></div>
+<div class="findings-grid">
+  <div class="fc">
+    <div class="fc-header" style="background:var(--tb0)">
+      <div class="fc-num" style="color:var(--tt0)">89% time, 14% GPU</div>
+    </div>
+    <div class="fc-body">
+      <div class="fc-desc">Decode — generating the answer token by token — eats 88.7% of every request's wall-clock time, yet sustains only 14% SM and 23% memory throughput. The slowest phase is also the one that wastes the most hardware.</div>
+    </div>
+  </div>
+  <div class="fc">
+    <div class="fc-header" style="background:var(--tb1)">
+      <div class="fc-num" style="color:var(--tt1)">Plateaus at SM = 36</div>
+    </div>
+    <div class="fc-body">
+      <div class="fc-desc">Output-heavy throughput flattens once a third of the GPU is active. The remaining 67% of streaming multiprocessors add under 9% more throughput. Input-heavy work, dominated by the vision encoder, keeps scaling all the way to SM = 108.</div>
+    </div>
+  </div>
+  <div class="fc">
+    <div class="fc-header" style="background:var(--tb4)">
+      <div class="fc-num" style="color:var(--tt4)">230 W &lt; 250 W TDP</div>
+    </div>
+    <div class="fc-body">
+      <div class="fc-desc">Power saturates at ~230 W at that same SM = 36 elbow — below the A100's 250 W limit. Because the GPU never reaches TDP, masking a single job's stranded SMs can't recover the energy. Batching can: 13× more efficient for output-heavy work.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── The four phases ── -->
+<div class="section-divider"><span class="section-divider-label">THE FOUR PHASES</span><span class="section-divider-line"></span></div>
+<p class="section-hint">One multimodal request, four phases. Pick any to see what it does and how hard it pushes the GPU.</p>
+<div class="struct-box">
+  <div class="struct-body">
+    <div class="struct-body-label" id="phaseLabel"></div>
+    <div class="struct-body-row">
+      <div>
+        <div class="struct-body-title" id="phaseTitle"></div>
+        <div class="struct-body-tag" id="phaseTag"></div>
+      </div>
+      <div>
+        <div class="struct-body-desc" id="phaseDesc"></div>
+        <div class="struct-body-stats" id="phaseStats"></div>
+      </div>
+    </div>
+    <div class="struct-body-diag" id="phaseDiag"></div>
+  </div>
+  <div class="struct-selector">
+    <div class="struct-side">
+      <div class="struct-side-label">Input pipeline · 3 phases</div>
+      <div class="struct-side-items" id="phaseInputBtns"></div>
+    </div>
+    <div class="struct-side">
+      <div class="struct-side-label">Generation · 1 phase</div>
+      <div class="struct-side-items" id="phaseGenBtns"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Where the time goes ── -->
+<div class="section-divider"><span class="section-divider-label">WHERE THE TIME GOES</span><span class="section-divider-line"></span></div>
+<p class="section-hint">Decode dominates the clock while barely touching the silicon — the gap this study is about.</p>
+
+<div class="stack">
+  <div class="stack-hd">
+    <span class="stack-title">Wall-time per request</span>
+    <span class="stack-meta">InternVL3-8B · BS 1 · 1344² image · 64 tokens</span>
+  </div>
+  <div class="stack-track" id="stackTrack"></div>
+  <div class="stack-legend" id="stackLegend"></div>
+</div>
+
+<div class="perf-panel">
+  <div class="perf-panel-hd">
+    <span class="perf-panel-title">Per-phase GPU utilization</span>
+    <span class="perf-panel-meta" id="utilMeta">% of peak sustained</span>
+  </div>
+  <p class="perf-panel-sub">Vision Encoder, MLP Connector and Prefill all keep the compute units busy. Decode is the outlier — low on both axes, for the longest time. Toggle the metric to compare.</p>
+  <div class="perf-tabs" id="utilTabs"></div>
+  <div id="utilBars"></div>
+  <div class="perf-foot">
+    <div class="perf-foot-label">How much headroom is in decode? Batching reveals it.</div>
+    <p class="perf-foot-desc">At batch 1, decode spends <em>23.2 ms per output token</em>. Pack 16 requests together and that drops to <em>1.6 ms/token</em> — a 14× speedup from the same hardware. The compute was always there; a single serial request just couldn't use it.</p>
+    <div class="perf-chips">
+      <span class="perf-chip" style="background:var(--tb0);color:var(--tt0)">BS 1: 23.2 ms/tok</span>
+      <span class="perf-chip" style="background:var(--tb0);color:var(--tt0)">BS 4: 6.5 ms/tok</span>
+      <span class="perf-chip" style="background:var(--tb0);color:var(--tt0)">BS 8: 3.2 ms/tok</span>
+      <span class="perf-chip" style="background:var(--tb0);color:var(--tt0)">BS 16: 1.6 ms/tok</span>
+    </div>
+  </div>
+</div>
+
+<div class="fig">
+  <div class="fig-media"><img src="figs/fig1c_headroom.png" alt="Decode time per output token vs batch size, showing 14x headroom" loading="lazy"></div>
+  <div class="fig-cap"><b>14× headroom at batch 1.</b> Decode time per output token follows a clean <span style="font-family:var(--font-mono)">y = 22.9 / batch</span> curve — textbook memory-bound behavior. The serial token dependency, not the GPU, is the limit.</div>
+</div>
+
+<!-- ── Results ── -->
+<div class="section-divider"><span class="section-divider-label">RESULTS — SWEEPING THE GPU</span><span class="section-divider-line"></span></div>
+<p class="section-hint">Two workloads, every batch size, SM count swept from 2 to 108. The two classes behave nothing alike.</p>
+
+<div class="perf-h2h">
+  <div class="perf-h2h-label">Input-Heavy vs. Output-Heavy</div>
+  <div class="perf-h2h-grid">
+    <div class="perf-h2h-side">
+      <div class="perf-h2h-name" style="color:var(--tt2)">Input-Heavy <span class="perf-h2h-pill" style="background:var(--tb2);color:var(--tt2)">vision-bound</span></div>
+      <div class="perf-h2h-num" style="color:var(--c2)">1.9&times;<span class="perf-h2h-unit">batch efficiency</span></div>
+      <div class="perf-h2h-ctx">throughput keeps climbing through SM = 108</div>
+      <div class="perf-h2h-kv"><span class="perf-h2h-kv-k">SM scaling</span><span class="perf-h2h-kv-v">no plateau (2 → 108)</span></div>
+      <div class="perf-h2h-kv"><span class="perf-h2h-kv-k">bottleneck</span><span class="perf-h2h-kv-v">vision encoder (compute)</span></div>
+      <div class="perf-h2h-kv"><span class="perf-h2h-kv-k">energy/req @ BS 1</span><span class="perf-h2h-kv-v">139 J</span></div>
+      <div class="perf-h2h-kv"><span class="perf-h2h-kv-k">energy/req @ BS 16</span><span class="perf-h2h-kv-v">1,177 J</span></div>
+    </div>
+    <div class="perf-h2h-divider"></div>
+    <div class="perf-h2h-side">
+      <div class="perf-h2h-name" style="color:var(--tt0)">Output-Heavy <span class="perf-h2h-pill" style="background:var(--tb0);color:var(--tt0)">decode-bound</span></div>
+      <div class="perf-h2h-num" style="color:var(--c0)">12.9&times;<span class="perf-h2h-unit">batch efficiency</span></div>
+      <div class="perf-h2h-ctx">throughput plateaus at SM = 36</div>
+      <div class="perf-h2h-kv"><span class="perf-h2h-kv-k">SM scaling</span><span class="perf-h2h-kv-v">elbow @ 36 · 67% idle</span></div>
+      <div class="perf-h2h-kv"><span class="perf-h2h-kv-k">bottleneck</span><span class="perf-h2h-kv-v">memory bandwidth</span></div>
+      <div class="perf-h2h-kv"><span class="perf-h2h-kv-k">energy/req @ BS 1</span><span class="perf-h2h-kv-v">1,114 J</span></div>
+      <div class="perf-h2h-kv"><span class="perf-h2h-kv-k">energy/req @ BS 16</span><span class="perf-h2h-kv-v">1,378 J</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="fig">
+  <div class="fig-media"><img src="figs/finding1_throughput_plateau.png" alt="Throughput vs active SMs for input-heavy and output-heavy workloads" loading="lazy"></div>
+  <div class="fig-cap"><b>Finding 1 — Throughput.</b> Output-heavy (right) saturates at SM ≈ 36 across every batch size; the elbow is unmistakable. Input-heavy (left) keeps climbing to the full chip because it spends real time in compute-bound vision encoding and prefill.</div>
+</div>
+
+<div class="fig">
+  <div class="fig-media"><img src="figs/finding2_power_ceiling.png" alt="Average GPU power vs active SMs, plateauing near 230W" loading="lazy"></div>
+  <div class="fig-cap"><b>Finding 2 — Power.</b> Power rises linearly with SM count then flattens at ~230 W (below the 250 W TDP) at the <em>same</em> SM ≈ 36 threshold. Above it, output-heavy work draws no more power and does no more work — the extra 72 SMs are clocked but stranded.</div>
+</div>
+
+<div class="fig">
+  <div class="fig-media"><img src="figs/finding3_energy_per_request.png" alt="Energy per request vs active SMs across batch sizes" loading="lazy"></div>
+  <div class="fig-cap"><b>Finding 3 — Energy &amp; batching.</b> Batching is a strong energy lever for output-heavy work (per-request energy barely moves while serving 16×) but a weak one for input-heavy: each request re-runs the ~1 s vision encoder, a fixed cost that never amortizes across a batch.</div>
+</div>
+
+<!-- ── Phase fingerprints ── -->
+<div class="section-divider"><span class="section-divider-label">PHASE FINGERPRINTS</span><span class="section-divider-line"></span></div>
+<p class="section-hint">Per-kernel SM and DRAM throughput over each phase's lifetime. Three phases run hot; decode flatlines.</p>
+<div class="fig-grid">
+  <div class="fig"><div class="fig-media"><img src="figs/fig_trace_vision.png" alt="Vision encoder kernel trace" loading="lazy"></div><div class="fig-cap"><b>Vision Encoder</b> — high SM, periodic DRAM spikes.</div></div>
+  <div class="fig"><div class="fig-media"><img src="figs/fig_trace_mlp.png" alt="MLP connector kernel trace" loading="lazy"></div><div class="fig-cap"><b>MLP Connector</b> — brief and compute-dense.</div></div>
+  <div class="fig"><div class="fig-media"><img src="figs/fig_trace_prefill.png" alt="Prefill kernel trace" loading="lazy"></div><div class="fig-cap"><b>Prefill</b> — sustained SM, healthy memory use.</div></div>
+  <div class="fig"><div class="fig-media"><img src="figs/fig_trace_decode.png" alt="Decode kernel trace" loading="lazy"></div><div class="fig-cap"><b>Decode</b> — ~14% SM, ~25% DRAM for 1.5 s straight.</div></div>
+</div>
+
+<!-- ── What this enables ── -->
+<div class="section-divider"><span class="section-divider-label">WHAT THIS ENABLES</span><span class="section-divider-line"></span></div>
+<p class="hero-desc" style="margin-top:0">
+  The stranded capacity is real and measurable: ~67% of the GPU sits powered but unused during small-batch
+  output-heavy decode. Single-job SM masking can't reclaim it — the GPU is already below its power limit — but two
+  unmasked knobs plausibly can. <strong>Frequency throttling during decode</strong> exploits the memory-bound regime
+  directly, and <strong>cross-workload spatial multiplexing</strong> could place compute-hungry input-heavy work onto
+  the idle SMs of a decoding job. Both motivate a phase-aware serving system that provisions hardware to each phase's
+  actual demand rather than treating inference as one monolithic block.
+</p>
+
+<!-- ── Methods ── -->
+<div class="section-divider"><span class="section-divider-label">HOW WE MEASURED</span><span class="section-divider-line"></span></div>
+<div class="method-grid">
+  <div class="method-cell"><div class="method-k">Model</div><div class="method-v">InternVL3-8B</div></div>
+  <div class="method-cell"><div class="method-k">Server</div><div class="method-v">patched vLLM</div></div>
+  <div class="method-cell"><div class="method-k">GPU</div><div class="method-v">NVIDIA A100 <span>SXM4 · 108 SM · 250 W</span></div></div>
+  <div class="method-cell"><div class="method-k">Phase attribution</div><div class="method-v">NVTX ranges</div></div>
+  <div class="method-cell"><div class="method-k">Kernel profiling</div><div class="method-v">Nsight Compute</div></div>
+  <div class="method-cell"><div class="method-k">Partitioning</div><div class="method-v">SM masking <span>(libsmctrl)</span></div></div>
+  <div class="method-cell"><div class="method-k">SM sweep</div><div class="method-v">2 → 108</div></div>
+  <div class="method-cell"><div class="method-k">Batch sizes</div><div class="method-v">1 · 2 · 4 · 8 · 16</div></div>
+  <div class="method-cell"><div class="method-k">Configurations</div><div class="method-v">1,080 <span>· 5 runs each</span></div></div>
+</div>
+
+<!-- ── Citation & references ── -->
+<div class="section-divider"><span class="section-divider-label">CITE &amp; REFERENCES</span><span class="section-divider-line"></span></div>
+<div class="cite-box">
+  <div class="cite-hd">BibTeX</div>
+  <div class="cite-code">@misc{attelli2026mllmenergy,
+  title  = {Energy-Efficient Multi-Modal LLM Serving:
+            A Sub-phase Characterization Study},
+  author = {Attelli, Aashrith and Jayr, Amaury and
+            Lemma, Nathan and Naveen, Mahin},
+  year   = {2026},
+  note   = {University of Texas at Austin}
+}</div>
+</div>
+<ol class="refs">
+  <li><span><b>ModServe:</b> Modality- and Stage-Aware Resource Disaggregation for Scalable Multimodal Model Serving. Qiu et al., ACM SoCC 2026. arXiv:2502.00937.</span></li>
+  <li><span><b>CornServe:</b> Efficiently Serving Any-to-Any Multimodal Models. Ma et al., 2025. arXiv:2512.14098.</span></li>
+  <li><span><b>ElasticMM:</b> Efficient Multimodal LLMs Serving with Elastic Multimodal Parallelism. Liu et al., NeurIPS 2025. arXiv:2507.10069.</span></li>
+  <li><span><b>Hardware Compute Partitioning on NVIDIA GPUs (libsmctrl).</b> Bakita &amp; Anderson, IEEE RTAS 2023.</span></li>
+</ol>
+
+<div class="footer">
+  Aashrith Attelli · Amaury Jayr · Nathan Lemma · Mahin Naveen — University of Texas at Austin · Spring 2026.<br>
+  <a href="https://github.com/mllm-energy/MLLM-Energy">github.com/mllm-energy/MLLM-Energy</a> &nbsp;·&nbsp;
+  <a href="paper.pdf" target="_blank">Read the paper</a>. Figures generated from measured A100 profiling data.
+</div>
+
+<script>
+/* ── Phase explorer data ── */
+const P=[
+  {key:'vision',name:'Vision Encoder',side:'input',c:2,tag:'compute-bound',
+   sm:58,dram:27,time:'168 ms',pct:'9.5%',
+   desc:'Splits the input image into tiles — a 1344×1344 image becomes roughly 2,560 visual tokens — and turns each tile into a vector the model can reason over. It keeps the compute units busy (58% SM, with periodic memory spikes) and is the single biggest fixed cost in image-heavy traffic: it re-runs for every image in a batch, so it never amortizes.'},
+  {key:'mlp',name:'MLP Connector',side:'input',c:4,tag:'compute-bound · negligible',
+   sm:71,dram:24,time:'0.38 ms',pct:'<0.1%',
+   desc:'A small translation layer that projects the vision vectors into the language model\'s hidden space. The shortest phase by far — under 0.1% of the request. It pushes SM utilization to 71% while it runs, but it\'s over in a blink and never shows up on the wall clock.'},
+  {key:'prefill',name:'Prefill',side:'input',c:1,tag:'compute-bound',
+   sm:58,dram:31,time:'32 ms',pct:'1.8%',
+   desc:'Reads the entire prompt at once and builds the KV-cache — the model\'s working memory for everything it has seen so far. Because it processes all prompt tokens in parallel, it is compute-bound and efficient: 58% SM, 31% memory, and only 1.8% of the request.'},
+  {key:'decode',name:'Decode',side:'gen',c:0,tag:'memory-bound · the bottleneck',
+   sm:14,dram:23,time:'1.57 s',pct:'88.7%',
+   desc:'Generates the answer one token at a time, each token waiting on the one before it. That serial dependency starves the GPU: just 14% SM and 23% memory throughput, sustained for 1.57 seconds — 88.7% of the request. It is memory-bandwidth-bound, not compute-bound, which is exactly why its idle compute is reclaimable.'},
+];
+let sel=3;
+
+const arrow=(id)=>`<marker id="${id}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round"/></marker>`;
+
+const DIAGS={
+// VISION: image -> tiles -> tokens
+vision:`<svg width="100%" viewBox="0 0 680 210" preserveAspectRatio="xMidYMin meet"><defs>${arrow('av')}</defs>
+<rect x="24" y="56" width="104" height="92" rx="8" stroke-width="0.5" style="fill:var(--tb2);stroke:var(--tt2)"/>
+<circle cx="52" cy="84" r="9" style="fill:var(--tt2);fill-opacity:.7"/>
+<path d="M40 132 L70 96 L92 122 L108 104 L116 132 Z" style="fill:var(--tt2);fill-opacity:.45"/>
+<text x="76" y="170" text-anchor="middle" style="font-size:10px;fill:var(--color-text-tertiary)">image · 1344²</text>
+<line x1="132" y1="102" x2="172" y2="102" stroke-width="0.9" style="stroke:var(--c2);stroke-opacity:.55" marker-end="url(#av)"/>
+<g>${[0,1,2,3].map(r=>[0,1,2,3].map(col=>`<rect x="${188+col*26}" y="${58+r*22}" width="22" height="18" rx="2" stroke-width="0.5" style="fill:var(--color-background-secondary);stroke:var(--color-border-secondary)"/>`).join('')).join('')}</g>
+<text x="240" y="170" text-anchor="middle" style="font-size:10px;fill:var(--color-text-tertiary)">~2,560 tiles</text>
+<line x1="300" y1="102" x2="340" y2="102" stroke-width="0.9" style="stroke:var(--c2);stroke-opacity:.55" marker-end="url(#av)"/>
+<rect x="356" y="50" width="200" height="104" rx="10" stroke-dasharray="4 3" stroke-width="0.8" style="fill:var(--c2);fill-opacity:.06;stroke:var(--c2);stroke-opacity:.4"/>
+${[0,1,2,3,4,5].map(i=>`<rect x="372" y="${62+i*14}" width="${168-(i%3)*30}" height="8" rx="4" style="fill:var(--tt2);fill-opacity:${.8-i*0.07}"/>`).join('')}
+<text x="456" y="170" text-anchor="middle" style="font-size:10px;fill:var(--color-text-tertiary)">visual tokens</text>
+<rect x="572" y="74" width="86" height="56" rx="8" stroke-width="0.5" style="fill:var(--tb2);stroke:var(--tt2)"/>
+<text x="615" y="96" text-anchor="middle" style="font-size:15px;font-weight:700;font-family:var(--font-mono);fill:var(--tt2)">58%</text>
+<text x="615" y="114" text-anchor="middle" style="font-size:9px;fill:var(--color-text-tertiary)">SM busy</text>
+<text x="340" y="200" text-anchor="middle" style="font-size:11px;fill:var(--tt2)">one image becomes thousands of tokens — compute-hungry, never amortized</text></svg>`,
+
+// MLP: vision vectors -> projection -> language space
+mlp:`<svg width="100%" viewBox="0 0 680 210" preserveAspectRatio="xMidYMin meet"><defs>${arrow('am')}</defs>
+${[0,1,2,3,4].map(i=>`<rect x="60" y="${62+i*16}" width="120" height="9" rx="4" style="fill:var(--color-text-tertiary);fill-opacity:${.55-i*0.05}"/>`).join('')}
+<text x="120" y="172" text-anchor="middle" style="font-size:10px;fill:var(--color-text-tertiary)">vision vectors</text>
+<line x1="190" y1="100" x2="232" y2="100" stroke-width="0.9" style="stroke:var(--c4);stroke-opacity:.55" marker-end="url(#am)"/>
+<path d="M250 56 L430 78 L430 122 L250 144 Z" stroke-width="0.5" style="fill:var(--tb4);stroke:var(--tt4)"/>
+<text x="340" y="96" text-anchor="middle" style="font-size:13px;font-weight:600;fill:var(--tt4)">MLP</text>
+<text x="340" y="114" text-anchor="middle" style="font-size:9px;fill:var(--color-text-tertiary)">project</text>
+<line x1="438" y1="100" x2="480" y2="100" stroke-width="0.9" style="stroke:var(--c4);stroke-opacity:.55" marker-end="url(#am)"/>
+${[0,1,2,3,4].map(i=>`<rect x="500" y="${62+i*16}" width="120" height="9" rx="4" style="fill:var(--tt4);fill-opacity:${.8-i*0.07}"/>`).join('')}
+<text x="560" y="172" text-anchor="middle" style="font-size:10px;fill:var(--color-text-tertiary)">language space</text>
+<rect x="296" y="150" width="88" height="22" rx="11" style="fill:var(--tb4);stroke-width:0.5;stroke:var(--tt4)"/>
+<text x="340" y="161" text-anchor="middle" dominant-baseline="central" style="font-size:11px;font-weight:600;font-family:var(--font-mono);fill:var(--tt4)">0.38 ms</text>
+<text x="340" y="200" text-anchor="middle" style="font-size:11px;fill:var(--tt4)">a quick bridge between modalities — blink and you miss it</text></svg>`,
+
+// PREFILL: prompt tokens in parallel -> KV cache
+prefill:`<svg width="100%" viewBox="0 0 680 210" preserveAspectRatio="xMidYMin meet"><defs>${arrow('ap')}</defs>
+${[0,1,2,3,4,5,6,7].map(i=>`<rect x="${56+i*40}" y="40" width="30" height="26" rx="4" stroke-width="0.5" style="fill:var(--tb1);stroke:var(--tt1)"/>`).join('')}
+<text x="216" y="32" text-anchor="middle" style="font-size:10px;fill:var(--color-text-tertiary)">whole prompt, read at once</text>
+${[0,1,2,3,4,5,6,7].map(i=>`<line x1="${71+i*40}" y1="68" x2="${71+i*40}" y2="100" stroke-width="0.9" style="stroke:var(--c1);stroke-opacity:.5" marker-end="url(#ap)"/>`).join('')}
+<rect x="48" y="106" width="336" height="74" rx="10" stroke-width="0.5" style="fill:var(--color-background-secondary);stroke:var(--color-border-secondary)"/>
+<text x="216" y="124" text-anchor="middle" style="font-size:9px;fill:var(--color-text-tertiary);text-transform:uppercase;letter-spacing:.08em">KV-cache</text>
+${[0,1,2,3,4,5,6,7].map(i=>`<rect x="${62+i*40}" y="134" width="30" height="34" rx="3" stroke-width="0.5" style="fill:var(--tb1);fill-opacity:.6;stroke:var(--tt1);stroke-opacity:.5"/>`).join('')}
+<line x1="392" y1="143" x2="432" y2="143" stroke-width="0.9" style="stroke:var(--c1);stroke-opacity:.55" marker-end="url(#ap)"/>
+<rect x="448" y="116" width="98" height="56" rx="8" stroke-width="0.5" style="fill:var(--tb1);stroke:var(--tt1)"/>
+<text x="497" y="138" text-anchor="middle" style="font-size:15px;font-weight:700;font-family:var(--font-mono);fill:var(--tt1)">58%</text>
+<text x="497" y="156" text-anchor="middle" style="font-size:9px;fill:var(--color-text-tertiary)">SM busy</text>
+<rect x="562" y="116" width="96" height="56" rx="8" stroke-width="0.5" style="fill:var(--color-background-secondary);stroke:var(--color-border-tertiary)"/>
+<text x="610" y="138" text-anchor="middle" style="font-size:13px;font-weight:700;font-family:var(--font-mono);fill:var(--color-text-secondary)">1.8%</text>
+<text x="610" y="156" text-anchor="middle" style="font-size:9px;fill:var(--color-text-tertiary)">of request</text>
+<text x="340" y="200" text-anchor="middle" style="font-size:11px;fill:var(--tt1)">all prompt tokens in parallel — fills the cache fast and efficiently</text></svg>`,
+
+// DECODE: serial chain + mostly-idle GPU bar
+decode:`<svg width="100%" viewBox="0 0 680 210" preserveAspectRatio="xMidYMin meet"><defs>${arrow('ad')}</defs>
+${[0,1,2,3].map(i=>`<rect x="${40+i*92}" y="40" width="56" height="30" rx="5" stroke-width="0.5" style="fill:var(--tb0);stroke:var(--tt0)"/><text x="${68+i*92}" y="55" text-anchor="middle" dominant-baseline="central" style="font-size:11px;font-family:var(--font-mono);fill:var(--tt0)">t${i+1}</text>${i<3?`<line x1="${96+i*92}" y1="55" x2="${128+i*92}" y2="55" stroke-width="0.9" style="stroke:var(--c0);stroke-opacity:.55" marker-end="url(#ad)"/>`:''}`).join('')}
+<text x="420" y="55" dominant-baseline="central" style="font-size:16px;fill:var(--color-text-tertiary)">···</text>
+<text x="468" y="55" dominant-baseline="central" style="font-size:11px;fill:var(--color-text-tertiary)">one at a time</text>
+<text x="206" y="92" text-anchor="middle" style="font-size:9px;fill:var(--color-text-tertiary);font-style:italic">each token waits on the last</text>
+<text x="40" y="124" style="font-size:9px;fill:var(--color-text-tertiary);text-transform:uppercase;letter-spacing:.08em">GPU compute units</text>
+<rect x="40" y="132" width="600" height="34" rx="6" stroke-width="0.5" style="fill:var(--color-background-secondary);stroke:var(--color-border-secondary)"/>
+<rect x="40" y="132" width="84" height="34" rx="6" style="fill:var(--tt0);fill-opacity:.85"/>
+<text x="82" y="150" text-anchor="middle" dominant-baseline="central" style="font-size:11px;font-weight:600;font-family:var(--font-mono);fill:#fff">14%</text>
+<text x="388" y="150" text-anchor="middle" dominant-baseline="central" style="font-size:11px;fill:var(--color-text-tertiary)">86% idle — clocked, powered, doing nothing</text>
+<text x="340" y="200" text-anchor="middle" style="font-size:11px;fill:var(--tt0)">88.7% of the request · 1.57 s · the headroom this study quantifies</text></svg>`,
+};
+
+function setPhase(k){sel=P.findIndex(p=>p.key===k);renderPhase();}
+
+function renderPhase(){
+  const d=P[sel];
+  const lbl=document.getElementById('phaseLabel');
+  lbl.textContent=d.side==='gen'?'PHASE · GENERATION':'PHASE · INPUT PIPELINE';
+  lbl.style.color=`var(--tt${d.c})`;
+  const ttl=document.getElementById('phaseTitle');
+  ttl.textContent=d.name;ttl.style.color=`var(--tt${d.c})`;
+  document.getElementById('phaseDesc').textContent=d.desc;
+  const tag=document.getElementById('phaseTag');
+  tag.textContent=d.tag;tag.style.background=`var(--tb${d.c})`;tag.style.color=`var(--tt${d.c})`;
+  document.getElementById('phaseStats').innerHTML=
+    `<div class="struct-stat">SM throughput<b style="color:var(--c${d.c})">${d.sm}%</b></div>`+
+    `<div class="struct-stat">DRAM throughput<b style="color:var(--c${d.c})">${d.dram}%</b></div>`+
+    `<div class="struct-stat">share of request<b style="color:var(--c${d.c})">${d.pct}</b></div>`+
+    `<div class="struct-stat">wall time<b style="color:var(--c${d.c})">${d.time}</b></div>`;
+  document.getElementById('phaseDiag').innerHTML=DIAGS[d.key];
+  const btn=(p)=>`<span class="struct-btn${p.key===d.key?' act':''}" onclick="setPhase('${p.key}')" style="${p.key===d.key?`border-color:var(--c${p.c});color:var(--tt${p.c});background:var(--tb${p.c})`:''}">${p.name}</span>`;
+  document.getElementById('phaseInputBtns').innerHTML=P.filter(p=>p.side==='input').map(btn).join('');
+  document.getElementById('phaseGenBtns').innerHTML=P.filter(p=>p.side==='gen').map(btn).join('');
+}
+renderPhase();
+
+/* ── Wall-time stacked bar ── */
+const WT=[
+  {n:'Decode',c:0,pct:88.7,lab:'88.7% · 1.57 s'},
+  {n:'Vision Encoder',c:2,pct:9.5,lab:'9.5%'},
+  {n:'Prefill',c:1,pct:1.8,lab:'1.8%'},
+  {n:'MLP Connector',c:4,pct:0.5,lab:'<0.1%'},
+];
+document.getElementById('stackTrack').innerHTML=WT.map(s=>
+  `<span class="stack-seg" style="width:${s.pct}%;background:var(--c${s.c})" title="${s.n}: ${s.lab}">${s.pct>=8?s.lab:''}</span>`).join('');
+document.getElementById('stackLegend').innerHTML=WT.map(s=>
+  `<span class="stack-leg"><span class="stack-dot" style="background:var(--c${s.c})"></span>${s.n} <span style="color:var(--color-text-tertiary)">· ${s.lab}</span></span>`).join('');
+
+/* ── Per-phase utilization bars ── */
+const UDATA=[
+  {n:'Vision Encoder',c:2,sm:58,dram:27},
+  {n:'MLP Connector',c:4,sm:71,dram:24},
+  {n:'Prefill',c:1,sm:58,dram:31},
+  {n:'Decode',c:0,sm:14,dram:23},
+];
+const UMET=[{k:'sm',n:'SM throughput',sub:'compute'},{k:'dram',n:'DRAM throughput',sub:'memory'}];
+let umsel=0;
+function renderUtil(){
+  document.getElementById('utilTabs').innerHTML=UMET.map((m,i)=>
+    `<span class="perf-tab${i===umsel?' act':''}" onclick="setUtil(${i})">${m.n}<span class="perf-tab-sub">· ${m.sub}</span></span>`).join('');
+  document.getElementById('utilMeta').textContent='% of peak · '+UMET[umsel].sub;
+  const key=UMET[umsel].k;
+  document.getElementById('utilBars').innerHTML=UDATA.map(d=>{
+    const v=d[key];
+    return `<div class="perf-bar"><span class="perf-bar-name" style="color:var(--tt${d.c})">${d.n}</span><span class="perf-bar-track"><span class="perf-bar-fill" style="width:${v}%;background:var(--c${d.c})"></span></span><span class="perf-bar-val" style="color:var(--c${d.c})">${v}<span class="perf-bar-val-unit">%</span></span></div>`;
+  }).join('');
+}
+function setUtil(i){umsel=i;renderUtil();}
+renderUtil();
+</script>
+</body>
+</html>
